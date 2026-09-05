@@ -56,6 +56,18 @@
   .pname-btn{font-size:16px !important}
 }
 
+
+.status-badge{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;padding:0 6px;border:1px solid #33465f;border-radius:999px;font-size:12px;font-weight:800;line-height:1;margin-left:6px;vertical-align:middle}
+.status-ok{color:#8ee6a8;border-color:#356a46;background:rgba(44,130,74,.13)}
+.status-q{color:#ffd166;border-color:#7f6a2a;background:rgba(180,145,30,.12)}
+.status-d{color:#ffb36b;border-color:#8a542a;background:rgba(180,93,30,.12)}
+.status-o{color:#ff7b7b;border-color:#8d3737;background:rgba(170,45,45,.13)}
+.status-ir{color:#d6a6ff;border-color:#69458b;background:rgba(100,58,130,.14)}
+.status-sus{color:#ff9be1;border-color:#81426f;background:rgba(145,50,115,.14)}
+.status-pup{color:#8fd8ff;border-color:#376b87;background:rgba(45,105,140,.13)}
+.status-na{color:#aab6c7;border-color:#475468;background:rgba(80,93,110,.12)}
+.status-legend{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+
 </style>
 </head>
 <body>
@@ -76,7 +88,13 @@
 
   <div class="main">
     <section class="panel">
-      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Rankings use the built-in Top 200 fallback; live team/projection data refreshes from Sleeper.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div></div><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><button id="refreshLiveBtn" class="btn">↻ Live Data</button><button id="missingBtn" class="btn">+ Missing Player</button></div></div>
+      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Rankings use the built-in Top 200 fallback; live team, projection, injury and status data refreshes from Sleeper.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div><div class="status-legend small muted">
+<span class="status-badge status-q" title="Questionable">?</span> Q
+<span class="status-badge status-d" title="Doubtful">!</span> D
+<span class="status-badge status-o" title="Out">×</span> Out
+<span class="status-badge status-ir" title="Injured Reserve">IR</span>
+<span class="status-badge status-sus" title="Suspended">S</span>
+</div></div><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><button id="refreshLiveBtn" class="btn">↻ Live Data</button><button id="missingBtn" class="btn">+ Missing Player</button></div></div>
       <input id="search" class="search" type="search" placeholder="Search player or NFL team..." />
       <div id="filters" class="filters"></div>
       <div class="player-head"><button id="rankSortBtn" class="sort-btn" type="button" aria-label="Sort players by overall rank">RK</button><button id="projSortBtn" class="sort-btn" type="button" aria-label="Sort players by projected season fantasy points">PROJ</button><div>PLAYER</div><div>POS</div><div></div></div>
@@ -340,6 +358,29 @@ function displayRank(p){
   return p&&p.rank!=null?p.rank:999;
 }
 
+
+function playerStatusBadge(p){
+  const raw=((p&&p.injuryStatus)||'').toString().trim();
+  const live=((p&&p.liveStatus)||'').toString().trim();
+  const s=(raw||live).toLowerCase();
+
+  let label='', cls='status-na', title='';
+  if(!s || s==='active' || s==='healthy' || s==='none'){
+    return '';
+  }
+  if(s.includes('question')){label='?';cls='status-q';title='Questionable';}
+  else if(s.includes('doubt')){label='!';cls='status-d';title='Doubtful';}
+  else if(s==='out' || s.includes(' out')){label='×';cls='status-o';title='Out';}
+  else if(s.includes('injured reserve') || s==='ir' || s.includes('reserve/injured')){label='IR';cls='status-ir';title='Injured Reserve';}
+  else if(s.includes('suspend')){label='S';cls='status-sus';title='Suspended';}
+  else if(s.includes('pup')){label='PUP';cls='status-pup';title='PUP';}
+  else if(s.includes('non-football') || s.includes('nfi')){label='NFI';cls='status-pup';title='Non-football injury list';}
+  else if(s.includes('inactive')){label='×';cls='status-o';title='Inactive';}
+  else {label='!';cls='status-na';title=raw||live;}
+
+  return `<span class="status-badge ${cls}" title="${title}" aria-label="${title}">${label}</span>`;
+}
+
 function positionRank(p){
   if(p&&p.v8PosRank)return p.v8PosRank;
   if(!p||!p.pos)return '';
@@ -375,7 +416,7 @@ function scorePlayer(p){let s=p.rank;const mine=myPositions(),count=x=>mine.filt
 function draftPlayer(p){if(state.pick>=state.teams*state.rounds)return;const pk=pickInfo(state.pick);state.drafted.push({player:p,pick:pk});state.pick++;state.search='';$('search').value='';saveState();render();closeModals();showToast(`${p.name} → Team ${pk.team}`)}
 function undo(){if(!state.drafted.length)return;const d=state.drafted.pop();state.pick=Math.max(0,state.pick-1);saveState();render();showToast(`Undid ${d.player.name}`)}
 function resetDraft(){if(!confirm('Clear all picks and start over?'))return;state.pick=0;state.drafted=[];saveState();render()}
-function openInfo(p){selected=p;$('infoRank').textContent=`OVERALL RANK #${p.custom?'—':p.rank}`;$('infoName').textContent=p.name;$('infoMeta').textContent=`${positionRank(p)} · ${p.team} · Bye Week ${byeWeek(p)}${p.injuryStatus?' · '+p.injuryStatus:(p.liveStatus&&p.liveStatus!=='Active'?' · '+p.liveStatus:'')}`;const rec=scorePlayer(p)<p.rank?'Fits a current roster need.':'Available based on overall ranking.';const pp=projectedPoints(p);$('recommendation').innerHTML=`<b>Draft snapshot</b><br>Rank: ${p.custom?'Custom':`#${p.rank}`} · Projection: ${pp==null?'Not loaded':pp.toFixed(1)+' pts'} (${state.scoring}) · ${rec}`;const d=detailedProjection(p), s=sampleStats[p.name];
+function openInfo(p){selected=p;$('infoRank').textContent=`OVERALL RANK #${p.custom?'—':p.rank}`;$('infoName').textContent=p.name;$('infoMeta').innerHTML=`${positionRank(p)} · ${p.team} · Bye Week ${byeWeek(p)} ${playerStatusBadge(p)}${p.injuryStatus?' · '+p.injuryStatus:(p.liveStatus&&p.liveStatus!=='Active'?' · '+p.liveStatus:'')}`;const rec=scorePlayer(p)<p.rank?'Fits a current roster need.':'Available based on overall ranking.';const pp=projectedPoints(p);$('recommendation').innerHTML=`<b>Draft snapshot</b><br>Rank: ${p.custom?'Custom':`#${p.rank}`} · Projection: ${pp==null?'Not loaded':pp.toFixed(1)+' pts'} (${state.scoring}) · ${rec}`;const d=detailedProjection(p), s=sampleStats[p.name];
   if(d){
     const cards=[];
     if(p.pos==='QB'){
@@ -414,7 +455,7 @@ function render(){
   $('rankSortBtn').classList.toggle('active',state.sortMode==='rank');
   $('projSortBtn').classList.toggle('active',state.sortMode==='projection');
   $('sortHelp').textContent=state.sortMode==='rank'?'Sorted by overall rank · tap PROJ for projected points.':state.sortMode==='projection'?`Sorted by ${state.scoring} projected season points · highest first.`:'200 draft-relevant players loaded · tap RK or PROJ to sort.';
-  const list=$('playerList');list.innerHTML='';avail.slice(0,state.shown).forEach((p,idx)=>{const row=document.createElement('div');row.className='player-row';const proj=projectedPoints(p);row.innerHTML=`<div class="small muted">${p.custom?'—':p.rank}</div><div class="small"><b>${proj==null?'—':proj.toFixed(1)}</b></div><div><button type="button" class="pname-btn" aria-label="View ${p.name} player info">${p.name}</button><div class="small muted">${p.team} · ${positionRank(p)} · Bye ${byeWeek(p)}${idx<3?(state.sortMode==='rank'?' · Top ranked':state.sortMode==='projection'?' · Top projection':' · Recommended'):''}</div></div><div class="small"><b>${p.pos}</b></div>`;row.querySelector('.pname-btn').onclick=()=>openInfo(p);const draft=document.createElement('button');draft.className='btn primary';draft.textContent='Draft';draft.onclick=()=>draftPlayer(p);row.append(draft);list.appendChild(row)});$('moreBtn').style.display=avail.length>state.shown?'block':'none';
+  const list=$('playerList');list.innerHTML='';avail.slice(0,state.shown).forEach((p,idx)=>{const row=document.createElement('div');row.className='player-row';const proj=projectedPoints(p);row.innerHTML=`<div class="small muted">${p.custom?'—':p.rank}</div><div class="small"><b>${proj==null?'—':proj.toFixed(1)}</b></div><div><button type="button" class="pname-btn" aria-label="View ${p.name} player info">${p.name}</button><div class="small muted">${p.team} · ${positionRank(p)} · Bye ${byeWeek(p)} ${playerStatusBadge(p)}${idx<3?(state.sortMode==='rank'?' · Top ranked':state.sortMode==='projection'?' · Top projection':' · Recommended'):''}</div></div><div class="small"><b>${p.pos}</b></div>`;row.querySelector('.pname-btn').onclick=()=>openInfo(p);const draft=document.createElement('button');draft.className='btn primary';draft.textContent='Draft';draft.onclick=()=>draftPlayer(p);row.append(draft);list.appendChild(row)});$('moreBtn').style.display=avail.length>state.shown?'block':'none';
   const goals={QB:1,RB:2,WR:2,TE:1,K:1,DST:1};const mine=state.drafted.filter(d=>d.pick.team===state.slot);$('needs').innerHTML=Object.entries(goals).map(([p,n])=>{const h=mine.filter(d=>d.player.pos===p).length;return `<span class="tag need ${h>=n?'done':''}">${p} ${h}/${n}</span>`}).join('');$('roster').innerHTML=mine.length?mine.map(d=>`<div class="roster-row"><span>${d.player.name}</span><span class="muted">${d.player.pos}</span></div>`).join(''):'<div class="small muted">Your roster is empty.</div>';
   $('recent').innerHTML=state.drafted.length?state.drafted.slice(-6).reverse().map(d=>`<div class="recent-row"><span>${d.pick.label} · T${d.pick.team}</span><b>${d.player.name}</b></div>`).join(''):'<div class="small muted">No picks yet.</div>';
   $('nextPicks').innerHTML='';for(let i=0;i<6;i++){const n=pickInfo(state.pick+i);const c=document.createElement('div');c.className='next-cell '+(n.team===state.slot?'me':'');c.innerHTML=`<b>${n.label}</b><br><span class="muted">T${n.team}</span>`;$('nextPicks').appendChild(c)}
