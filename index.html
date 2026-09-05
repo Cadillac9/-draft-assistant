@@ -76,7 +76,7 @@
 
   <div class="main">
     <section class="panel">
-      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div class="small muted" style="margin-top:2px">2026 Top 200 · Aug 30</div><div class="small muted">Full Half-PPR projections loaded for all 200 players.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div></div><button id="missingBtn" class="btn">+ Missing Player</button></div>
+      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div class="small muted" style="margin-top:2px">2026 Top 200 · Aug 30 · v8.1</div><div class="small muted">Half-PPR projections pull directly from the Top 200 database.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div></div><button id="missingBtn" class="btn">+ Missing Player</button></div>
       <input id="search" class="search" type="search" placeholder="Search player or NFL team..." />
       <div id="filters" class="filters"></div>
       <div class="player-head"><button id="rankSortBtn" class="sort-btn" type="button" aria-label="Sort players by overall rank">RK</button><button id="projSortBtn" class="sort-btn" type="button" aria-label="Sort players by projected season fantasy points">PROJ</button><div>PLAYER</div><div>POS</div><div></div></div>
@@ -179,12 +179,27 @@ const projectionData = {
   "Falcons DST": {half:105.0}
 };
 function projectedPoints(p){
+  if(p && p.v8Half!=null){
+    if(state.scoring==='Half PPR') return Number(p.v8Half.toFixed(1));
+
+    const d=verifiedProjectionDetails[p.name];
+    if(!d) return null;
+
+    const half=Number(d.half);
+    const rec=Number(d.rec||0);
+
+    if(p.pos==='QB') return Number(half.toFixed(1));
+    if(state.scoring==='PPR') return Number((half + rec*0.5).toFixed(1));
+    if(state.scoring==='Standard') return Number((half - rec*0.5).toFixed(1));
+    return Number(half.toFixed(1));
+  }
+
   const d=projectionData[p.name];
   if(!d) return null;
-  if(p.pos==='QB'||p.pos==='K'||p.pos==='DST') return d.half;
-  if(state.scoring==='PPR') return +(d.half + (d.rec||0)*0.5).toFixed(1);
-  if(state.scoring==='Standard') return +(d.half - (d.rec||0)*0.5).toFixed(1);
-  return d.half;
+  if(p.pos==='QB'||p.pos==='K'||p.pos==='DST') return Number(d.half.toFixed(1));
+  if(state.scoring==='PPR') return Number((d.half + (d.rec||0)*0.5).toFixed(1));
+  if(state.scoring==='Standard') return Number((d.half - (d.rec||0)*0.5).toFixed(1));
+  return Number(d.half.toFixed(1));
 }
 
 
