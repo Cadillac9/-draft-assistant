@@ -76,7 +76,7 @@
 
   <div class="main">
     <section class="panel">
-      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div class="small muted" style="margin-top:2px">2026 Top 200 · Aug 30 · v8.1</div><div class="small muted">Half-PPR projections pull directly from the Top 200 database.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div></div><button id="missingBtn" class="btn">+ Missing Player</button></div>
+      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Rankings use the built-in Top 200 fallback; live team/projection data refreshes from Sleeper.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div></div><div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end"><button id="refreshLiveBtn" class="btn">↻ Live Data</button><button id="missingBtn" class="btn">+ Missing Player</button></div></div>
       <input id="search" class="search" type="search" placeholder="Search player or NFL team..." />
       <div id="filters" class="filters"></div>
       <div class="player-head"><button id="rankSortBtn" class="sort-btn" type="button" aria-label="Sort players by overall rank">RK</button><button id="projSortBtn" class="sort-btn" type="button" aria-label="Sort players by projected season fantasy points">PROJ</button><div>PLAYER</div><div>POS</div><div></div></div>
@@ -178,27 +178,154 @@ const projectionData = {
   "Lions DST": {half:106.9},
   "Falcons DST": {half:105.0}
 };
+
+const LIVE_CACHE_KEY='draftAssistantLiveV9';
+const LIVE_CACHE_MS=12*60*60*1000;
+const LIVE_POSITIONS=['QB','RB','WR','TE','K'];
+
+function normName(s){
+  return (s||'').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g,'')
+    .replace(/[.'’\-]/g,'').replace(/\s+(jr|sr|ii|iii|iv)$/,'')
+    .replace(/\s+/g,' ').trim();
+}
+function sleeperPoints(stats,keyList){
+  if(!stats) return null;
+  for(const k of keyList){
+    const v=stats[k];
+    if(v!==undefined && v!==null && v!=='' && Number.isFinite(Number(v))) return Number(v);
+  }
+  return null;
+}
+function applyLiveRecords(records, updatedAt){
+  const byName=new Map(pool.map(p=>[normName(p.name),p]));
+  let matched=0, projected=0, teams=0;
+  for(const r of records||[]){
+    const p=byName.get(normName(r.name));
+    if(!p) continue;
+    matched++;
+    if(r.player_id) p.sleeperId=String(r.player_id);
+    if(r.team && r.team!=='FA'){
+      if(p.team!==r.team) teams++;
+      p.team=r.team;
+    }
+    if(r.status) p.liveStatus=r.status;
+    if(r.injury_status) p.injuryStatus=r.injury_status;
+    if(r.half!=null){p.liveHalf=Number(r.half); projected++;}
+    if(r.ppr!=null)p.livePpr=Number(r.ppr);
+    if(r.std!=null)p.liveStd=Number(r.std);
+  }
+  const el=$('liveStatus');
+  if(el){
+    const d=updatedAt?new Date(updatedAt):new Date();
+    el.textContent=`Live Sleeper data · ${matched} matched · ${projected} projections · updated ${d.toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}`;
+  }
+  render();
+}
+function loadLiveCache(){
+  try{
+    const c=JSON.parse(localStorage.getItem(LIVE_CACHE_KEY)||'null');
+    if(c && Array.isArray(c.records)){
+      applyLiveRecords(c.records,c.updatedAt);
+      return c;
+    }
+  }catch(e){}
+  return null;
+}
+async function fetchSleeperPosition(pos){
+  const url=`https://api.sleeper.com/projections/nfl/2026?season_type=regular&position[]=${encodeURIComponent(pos)}&order_by=pts_half_ppr`;
+  const res=await fetch(url,{cache:'no-store'});
+  if(!res.ok) throw new Error(`Sleeper ${pos} ${res.status}`);
+  const data=await res.json();
+  return Array.isArray(data)?data:[];
+}
+async function fetchSleeperPlayerPosition(pos){
+  const url=`https://api.sleeper.app/v1/players/nfl?position=${encodeURIComponent(pos)}&active=true`;
+  const res=await fetch(url,{cache:'no-store'});
+  if(!res.ok) throw new Error(`Sleeper players ${pos} ${res.status}`);
+  return await res.json();
+}
+async function refreshLiveData(force=false){
+  const status=$('liveStatus');
+  const cached=loadLiveCache();
+  if(!force && cached && Date.now()-cached.updatedAt<LIVE_CACHE_MS){
+    // Cached data is fresh; still use it immediately without another large pull.
+    return;
+  }
+  if(status) status.textContent='Refreshing live Sleeper projections and rosters…';
+  try{
+    const [projectionSets,playerSets]=await Promise.all([
+      Promise.all(LIVE_POSITIONS.map(fetchSleeperPosition)),
+      Promise.all(LIVE_POSITIONS.map(fetchSleeperPlayerPosition))
+    ]);
+    const playersById={};
+    for(const obj of playerSets){
+      for(const [id,p] of Object.entries(obj||{})) playersById[id]=p;
+    }
+    const recMap=new Map();
+    for(const arr of projectionSets){
+      for(const x of arr){
+        const st=x.stats||x;
+        const player=x.player||playersById[String(x.player_id)]||{};
+        const id=String(x.player_id||player.player_id||'');
+        const full=(player.full_name || [player.first_name,player.last_name].filter(Boolean).join(' ') || x.full_name || x.name || '').trim();
+        if(!full) continue;
+        const rec={
+          player_id:id,
+          name:full,
+          team:player.team||x.team||null,
+          status:player.status||null,
+          injury_status:player.injury_status||null,
+          half:sleeperPoints(st,['pts_half_ppr','half_ppr','fantasy_points_half_ppr']),
+          ppr:sleeperPoints(st,['pts_ppr','ppr','fantasy_points_ppr']),
+          std:sleeperPoints(st,['pts_std','pts_standard','standard','fantasy_points'])
+        };
+        recMap.set(normName(full),rec);
+      }
+    }
+    // Fill roster/team info for active players even when a projection row is absent.
+    for(const p of Object.values(playersById)){
+      const full=(p.full_name || [p.first_name,p.last_name].filter(Boolean).join(' ')).trim();
+      if(!full) continue;
+      const key=normName(full);
+      const r=recMap.get(key)||{player_id:String(p.player_id||''),name:full,half:null,ppr:null,std:null};
+      r.team=p.team||r.team||null;r.status=p.status||r.status||null;r.injury_status=p.injury_status||r.injury_status||null;
+      recMap.set(key,r);
+    }
+    const records=[...recMap.values()];
+    const payload={updatedAt:Date.now(),records};
+    localStorage.setItem(LIVE_CACHE_KEY,JSON.stringify(payload));
+    applyLiveRecords(records,payload.updatedAt);
+    showToast(`Live data updated · ${records.length} Sleeper players`);
+  }catch(err){
+    console.warn(err);
+    if(status) status.textContent='Live update unavailable · using saved/offline player data';
+    if(!cached) render();
+    if(force) showToast('Could not reach Sleeper — using offline data');
+  }
+}
+
 function projectedPoints(p){
+  if(p){
+    if(state.scoring==='PPR' && p.livePpr!=null) return Number(p.livePpr);
+    if(state.scoring==='Standard' && p.liveStd!=null) return Number(p.liveStd);
+    if(state.scoring==='Half PPR' && p.liveHalf!=null) return Number(p.liveHalf);
+  }
   if(p && p.v8Half!=null){
     if(state.scoring==='Half PPR') return Number(p.v8Half.toFixed(1));
-
     const d=verifiedProjectionDetails[p.name];
     if(!d) return null;
-
-    const half=Number(d.half);
-    const rec=Number(d.rec||0);
-
+    const half=Number(d.half), rec=Number(d.rec||0);
     if(p.pos==='QB') return Number(half.toFixed(1));
     if(state.scoring==='PPR') return Number((half + rec*0.5).toFixed(1));
     if(state.scoring==='Standard') return Number((half - rec*0.5).toFixed(1));
     return Number(half.toFixed(1));
   }
-
   const d=projectionData[p.name];
-  if(!d) return null;
-  if(p.pos==='QB'||p.pos==='K'||p.pos==='DST') return Number(d.half.toFixed(1));
-  if(state.scoring==='PPR') return Number((d.half + (d.rec||0)*0.5).toFixed(1));
-  if(state.scoring==='Standard') return Number((d.half - (d.rec||0)*0.5).toFixed(1));
+  if(!d)return null;
+  if(p.pos==='QB'||p.pos==='K'||p.pos==='DST')return Number(d.half.toFixed(1));
+  if(state.scoring==='PPR')return Number((d.half+(d.rec||0)*0.5).toFixed(1));
+  if(state.scoring==='Standard')return Number((d.half-(d.rec||0)*0.5).toFixed(1));
   return Number(d.half.toFixed(1));
 }
 
@@ -248,7 +375,7 @@ function scorePlayer(p){let s=p.rank;const mine=myPositions(),count=x=>mine.filt
 function draftPlayer(p){if(state.pick>=state.teams*state.rounds)return;const pk=pickInfo(state.pick);state.drafted.push({player:p,pick:pk});state.pick++;state.search='';$('search').value='';saveState();render();closeModals();showToast(`${p.name} → Team ${pk.team}`)}
 function undo(){if(!state.drafted.length)return;const d=state.drafted.pop();state.pick=Math.max(0,state.pick-1);saveState();render();showToast(`Undid ${d.player.name}`)}
 function resetDraft(){if(!confirm('Clear all picks and start over?'))return;state.pick=0;state.drafted=[];saveState();render()}
-function openInfo(p){selected=p;$('infoRank').textContent=`OVERALL RANK #${p.custom?'—':p.rank}`;$('infoName').textContent=p.name;$('infoMeta').textContent=`${positionRank(p)} · ${p.team} · Bye Week ${byeWeek(p)}`;const rec=scorePlayer(p)<p.rank?'Fits a current roster need.':'Available based on overall ranking.';const pp=projectedPoints(p);$('recommendation').innerHTML=`<b>Draft snapshot</b><br>Rank: ${p.custom?'Custom':`#${p.rank}`} · Projection: ${pp==null?'Not loaded':pp.toFixed(1)+' pts'} (${state.scoring}) · ${rec}`;const d=detailedProjection(p), s=sampleStats[p.name];
+function openInfo(p){selected=p;$('infoRank').textContent=`OVERALL RANK #${p.custom?'—':p.rank}`;$('infoName').textContent=p.name;$('infoMeta').textContent=`${positionRank(p)} · ${p.team} · Bye Week ${byeWeek(p)}${p.injuryStatus?' · '+p.injuryStatus:(p.liveStatus&&p.liveStatus!=='Active'?' · '+p.liveStatus:'')}`;const rec=scorePlayer(p)<p.rank?'Fits a current roster need.':'Available based on overall ranking.';const pp=projectedPoints(p);$('recommendation').innerHTML=`<b>Draft snapshot</b><br>Rank: ${p.custom?'Custom':`#${p.rank}`} · Projection: ${pp==null?'Not loaded':pp.toFixed(1)+' pts'} (${state.scoring}) · ${rec}`;const d=detailedProjection(p), s=sampleStats[p.name];
   if(d){
     const cards=[];
     if(p.pos==='QB'){
@@ -294,7 +421,7 @@ function render(){
   $('undoBtn').disabled=!state.drafted.length;saveState();
 }
 ['ALL','QB','RB','WR','TE','K','DST'].forEach(pos=>{const b=document.createElement('button');b.className='btn filter '+(state.pos===pos?'active':'');b.textContent=pos;b.onclick=()=>{state.pos=pos;state.shown=40;document.querySelectorAll('.filter').forEach(x=>x.classList.remove('active'));b.classList.add('active');render()};$('filters').appendChild(b)});
-$('rankSortBtn').onclick=()=>{state.sortMode=state.sortMode==='rank'?'recommended':'rank';state.shown=40;saveState();render();showToast(state.sortMode==='rank'?'Sorted by rank':'Recommendation order')};$('projSortBtn').onclick=()=>{state.sortMode=state.sortMode==='projection'?'recommended':'projection';state.shown=40;saveState();render();showToast(state.sortMode==='projection'?'Sorted by projection':'Recommendation order')};$('teamCount').onchange=e=>{state.teams=+e.target.value;state.slot=Math.min(state.slot,state.teams);state.pick=0;state.drafted=[];render()};$('mySlot').onchange=e=>{state.slot=+e.target.value;render()};$('rounds').onchange=e=>{state.rounds=+e.target.value;render()};$('scoring').onchange=e=>{state.scoring=e.target.value;saveState();render();showToast(`${state.scoring} projections loaded`)};$('search').oninput=e=>{state.search=e.target.value.trim().toLowerCase();state.shown=40;render()};$('undoBtn').onclick=undo;$('resetBtn').onclick=resetDraft;$('moreBtn').onclick=()=>{state.shown+=40;render()};$('missingBtn').onclick=()=>$('missingModal').classList.add('open');$('closeMissing').onclick=closeModals;$('addMissingDraft').onclick=()=>{const name=$('missingName').value.trim();if(!name)return alert('Enter the player name.');const p={id:Date.now(),name,pos:$('missingPos').value,team:$('missingTeam').value.trim().toUpperCase()||'FA',rank:9999,custom:true};pool.push(p);state.customPlayers=pool.filter(x=>x.custom);$('missingName').value='';$('missingTeam').value='';draftPlayer(p)};$('closeInfo').onclick=closeModals;$('draftFromInfo').onclick=()=>selected&&draftPlayer(selected);$('saveNote').onclick=()=>{if(selected){state.notes[selected.id]=$('playerNote').value;saveState();showToast('Note saved')}};$('teamsBtn').onclick=()=>{const box=$('allTeams');box.innerHTML='';for(let t=1;t<=state.teams;t++){const picks=state.drafted.filter(d=>d.pick.team===t);const c=document.createElement('div');c.className='team-card';c.innerHTML=`<b>Team ${t}${t===state.slot?' · YOU':''}</b><div class="small" style="margin-top:6px">${picks.length?picks.map(d=>`${d.player.pos} · ${d.player.name}`).join('<br>'):'<span class="muted">No players</span>'}</div>`;box.appendChild(c)}$('teamsModal').classList.add('open')};$('closeTeams').onclick=closeModals;document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)closeModals()}));
+$('refreshLiveBtn').onclick=()=>refreshLiveData(true);$('rankSortBtn').onclick=()=>{state.sortMode=state.sortMode==='rank'?'recommended':'rank';state.shown=40;saveState();render();showToast(state.sortMode==='rank'?'Sorted by rank':'Recommendation order')};$('projSortBtn').onclick=()=>{state.sortMode=state.sortMode==='projection'?'recommended':'projection';state.shown=40;saveState();render();showToast(state.sortMode==='projection'?'Sorted by projection':'Recommendation order')};$('teamCount').onchange=e=>{state.teams=+e.target.value;state.slot=Math.min(state.slot,state.teams);state.pick=0;state.drafted=[];render()};$('mySlot').onchange=e=>{state.slot=+e.target.value;render()};$('rounds').onchange=e=>{state.rounds=+e.target.value;render()};$('scoring').onchange=e=>{state.scoring=e.target.value;saveState();render();showToast(`${state.scoring} projections loaded`)};$('search').oninput=e=>{state.search=e.target.value.trim().toLowerCase();state.shown=40;render()};$('undoBtn').onclick=undo;$('resetBtn').onclick=resetDraft;$('moreBtn').onclick=()=>{state.shown+=40;render()};$('missingBtn').onclick=()=>$('missingModal').classList.add('open');$('closeMissing').onclick=closeModals;$('addMissingDraft').onclick=()=>{const name=$('missingName').value.trim();if(!name)return alert('Enter the player name.');const p={id:Date.now(),name,pos:$('missingPos').value,team:$('missingTeam').value.trim().toUpperCase()||'FA',rank:9999,custom:true};pool.push(p);state.customPlayers=pool.filter(x=>x.custom);$('missingName').value='';$('missingTeam').value='';draftPlayer(p)};$('closeInfo').onclick=closeModals;$('draftFromInfo').onclick=()=>selected&&draftPlayer(selected);$('saveNote').onclick=()=>{if(selected){state.notes[selected.id]=$('playerNote').value;saveState();showToast('Note saved')}};$('teamsBtn').onclick=()=>{const box=$('allTeams');box.innerHTML='';for(let t=1;t<=state.teams;t++){const picks=state.drafted.filter(d=>d.pick.team===t);const c=document.createElement('div');c.className='team-card';c.innerHTML=`<b>Team ${t}${t===state.slot?' · YOU':''}</b><div class="small" style="margin-top:6px">${picks.length?picks.map(d=>`${d.player.pos} · ${d.player.name}`).join('<br>'):'<span class="muted">No players</span>'}</div>`;box.appendChild(c)}$('teamsModal').classList.add('open')};$('closeTeams').onclick=closeModals;document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)closeModals()}));
 render();
 if('serviceWorker' in navigator){window.addEventListener('load',()=>navigator.serviceWorker.register('./service-worker.js').catch(()=>{}))}
 </script>
