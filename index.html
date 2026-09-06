@@ -88,7 +88,7 @@
 
   <div class="main">
     <section class="panel">
-      <div class="headrow"><div><h3 class="section-title">Best Available</h3><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Rankings use the built-in Top 200 fallback; live team, projection, injury and status data refreshes from Sleeper.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div><div class="status-legend small muted">
+      <div class="headrow"><div><h3 class="section-title">Best Available</h3><span class="small muted" style="margin-left:8px">v10</span><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Top-200 skill-player rankings + position ranks for K/DST. Live team, projection, injury and status data refreshes from Sleeper.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div><div class="status-legend small muted">
 <span class="status-badge status-q" title="Questionable">?</span> Q
 <span class="status-badge status-d" title="Doubtful">!</span> D
 <span class="status-badge status-o" title="Out">×</span> Out
@@ -200,6 +200,7 @@ const projectionData = {
 const LIVE_CACHE_KEY='draftAssistantLiveV9';
 const LIVE_CACHE_MS=12*60*60*1000;
 const LIVE_POSITIONS=['QB','RB','WR','TE','K'];
+const LIVE_DST_POSITIONS=['DST','DEF'];
 
 function normName(s){
   return (s||'').toLowerCase()
@@ -219,7 +220,10 @@ function applyLiveRecords(records, updatedAt){
   const byName=new Map(pool.map(p=>[normName(p.name),p]));
   let matched=0, projected=0, teams=0;
   for(const r of records||[]){
-    const p=byName.get(normName(r.name));
+    let p=byName.get(normName(r.name));
+    if(!p && r.team){
+      p=pool.find(x=>x.pos==='DST' && x.team===r.team);
+    }
     if(!p) continue;
     matched++;
     if(r.player_id) p.sleeperId=String(r.player_id);
@@ -263,6 +267,30 @@ async function fetchSleeperPlayerPosition(pos){
   if(!res.ok) throw new Error(`Sleeper players ${pos} ${res.status}`);
   return await res.json();
 }
+
+const DST_TEAM_NAMES={
+  ARI:'Cardinals DST',ATL:'Falcons DST',BAL:'Ravens DST',BUF:'Bills DST',CAR:'Panthers DST',
+  CHI:'Bears DST',CIN:'Bengals DST',CLE:'Browns DST',DAL:'Cowboys DST',DEN:'Broncos DST',
+  DET:'Lions DST',GB:'Packers DST',HOU:'Texans DST',IND:'Colts DST',JAX:'Jaguars DST',
+  KC:'Chiefs DST',LV:'Raiders DST',LAC:'Chargers DST',LAR:'Rams DST',MIA:'Dolphins DST',
+  MIN:'Vikings DST',NE:'Patriots DST',NO:'Saints DST',NYG:'Giants DST',NYJ:'Jets DST',
+  PHI:'Eagles DST',PIT:'Steelers DST',SF:'49ers DST',SEA:'Seahawks DST',TB:'Buccaneers DST',
+  TEN:'Titans DST',WAS:'Commanders DST'
+};
+async function fetchSleeperDST(){
+  const tries=[];
+  for(const pos of LIVE_DST_POSITIONS){
+    try{
+      const url=`https://api.sleeper.com/projections/nfl/2026?season_type=regular&position[]=${encodeURIComponent(pos)}&order_by=pts_std`;
+      const res=await fetch(url,{cache:'no-store'});
+      if(!res.ok) continue;
+      const data=await res.json();
+      if(Array.isArray(data) && data.length) tries.push(...data);
+    }catch(e){}
+  }
+  return tries;
+}
+
 async function refreshLiveData(force=false){
   const status=$('liveStatus');
   const cached=loadLiveCache();
@@ -272,9 +300,10 @@ async function refreshLiveData(force=false){
   }
   if(status) status.textContent='Refreshing live Sleeper projections and rosters…';
   try{
-    const [projectionSets,playerSets]=await Promise.all([
+    const [projectionSets,playerSets,dstProjectionSet]=await Promise.all([
       Promise.all(LIVE_POSITIONS.map(fetchSleeperPosition)),
-      Promise.all(LIVE_POSITIONS.map(fetchSleeperPlayerPosition))
+      Promise.all(LIVE_POSITIONS.map(fetchSleeperPlayerPosition)),
+      fetchSleeperDST()
     ]);
     const playersById={};
     for(const obj of playerSets){
@@ -301,6 +330,26 @@ async function refreshLiveData(force=false){
         recMap.set(normName(full),rec);
       }
     }
+
+    // Match team-defense projections directly by NFL team abbreviation.
+    for(const x of (dstProjectionSet||[])){
+      const st=x.stats||x;
+      let team=(x.team || (x.player&&x.player.team) || x.player_id || '').toString().toUpperCase();
+      if(!DST_TEAM_NAMES[team]) continue;
+      const full=DST_TEAM_NAMES[team];
+      const rec={
+        player_id:`DST-${team}`,
+        name:full,
+        team,
+        status:'Active',
+        injury_status:null,
+        half:sleeperPoints(st,['pts_half_ppr','half_ppr','pts_std','pts_standard','fantasy_points']),
+        ppr:sleeperPoints(st,['pts_ppr','pts_half_ppr','pts_std','pts_standard','fantasy_points']),
+        std:sleeperPoints(st,['pts_std','pts_standard','pts_half_ppr','fantasy_points'])
+      };
+      recMap.set(normName(full),rec);
+    }
+
     // Fill roster/team info for active players even when a projection row is absent.
     for(const p of Object.values(playersById)){
       const full=(p.full_name || [p.first_name,p.last_name].filter(Boolean).join(' ')).trim();
@@ -323,6 +372,19 @@ async function refreshLiveData(force=false){
   }
 }
 
+
+const SPECIAL_TEAMS_FALLBACK={
+  // FantasyPros consensus season projections, Sep 6 2026.
+  'Brandon Aubrey':151.4,'Jason Myers':150.4,"Ka'imi Fairbairn":144.5,'Cameron Dicker':142.7,
+  'Jake Bates':136.0,'Harrison Mevis':135.3,'Spencer Shrader':135.2,'Cairo Santos':133.3,
+  'Chase McLaughlin':132.9,'Eddy Pineiro':132.6,
+  'Texans DST':120.3,'Broncos DST':116.9,'Vikings DST':112.6,'Steelers DST':112.4,
+  'Seahawks DST':110.6,'Rams DST':109.3,'Chargers DST':108.6,'Bills DST':107.0,
+  'Lions DST':106.9,'Falcons DST':105.0,
+  // Karty is currently a free agent; current 2026 projection is 0.
+  'Joshua Karty':0
+};
+
 function projectedPoints(p){
   if(p){
     if(state.scoring==='PPR' && p.livePpr!=null) return Number(p.livePpr);
@@ -339,6 +401,9 @@ function projectedPoints(p){
     if(state.scoring==='Standard') return Number((half - rec*0.5).toFixed(1));
     return Number(half.toFixed(1));
   }
+  if((p.pos==='K'||p.pos==='DST') && SPECIAL_TEAMS_FALLBACK[p.name]!=null){
+    return Number(SPECIAL_TEAMS_FALLBACK[p.name]);
+  }
   const d=projectionData[p.name];
   if(!d)return null;
   if(p.pos==='QB'||p.pos==='K'||p.pos==='DST')return Number(d.half.toFixed(1));
@@ -353,6 +418,21 @@ const pprOverallRank={"Ja'Marr Chase":1,"Jahmyr Gibbs":2,"Puka Nacua":3,"Bijan R
 const teamBye={"ARI":14,"ATL":11,"BAL":13,"BUF":7,"CAR":5,"CHI":10,"CIN":6,"CLE":11,"DAL":14,"DEN":12,"DET":6,"GB":13,"HOU":9,"IND":13,"JAX":8,"KC":5,"LV":10,"LAC":12,"LAR":11,"MIA":6,"MIN":6,"NE":11,"NO":8,"NYG":8,"NYJ":9,"PHI":9,"PIT":7,"SF":8,"SEA":11,"TB":9,"TEN":10,"WAS":12};
 const verifiedProjectionDetails={"Jahmyr Gibbs":{"rushAtt":267.2,"rushYds":1413.3,"rushTd":13.2,"rec":70.4,"recYds":566.7,"recTd":4.1,"half":334.4},"Bijan Robinson":{"rushAtt":295.7,"rushYds":1426.4,"rushTd":9.0,"rec":73.8,"recYds":663.7,"recTd":3.4,"half":316.4},"Christian McCaffrey":{"rushAtt":261.4,"rushYds":1088.1,"rushTd":8.4,"rec":78.4,"recYds":686.8,"recTd":4.5,"half":292.1},"Jonathan Taylor":{"rushAtt":317.9,"rushYds":1465.8,"rushTd":12.7,"rec":45.2,"recYds":353.7,"recTd":1.6,"half":286.8},"Derrick Henry":{"rushAtt":319.5,"rushYds":1541.5,"rushTd":13.2,"rec":21.6,"recYds":210.8,"recTd":1.0,"half":267.7},"De'Von Achane":{"rushAtt":237.3,"rushYds":1200.5,"rushTd":6.2,"rec":69.8,"recYds":532.0,"recTd":3.8,"half":265.8},"James Cook III":{"rushAtt":297.7,"rushYds":1451.4,"rushTd":10.5,"rec":30.7,"recYds":260.2,"recTd":1.7,"half":255.2},"Chase Brown":{"rushAtt":249.9,"rushYds":1085.8,"rushTd":7.7,"rec":65.2,"recYds":444.3,"recTd":4.0,"half":253.2},"Saquon Barkley":{"rushAtt":295.7,"rushYds":1327.4,"rushTd":8.3,"rec":45.0,"recYds":353.3,"recTd":2.2,"half":251.7},"Kenneth Walker III":{"rushAtt":264.5,"rushYds":1174.1,"rushTd":8.7,"rec":45.3,"recYds":346.9,"recTd":1.5,"half":234.4},"Puka Nacua":{"rec":117.0,"recYds":1539.0,"recTd":9.0,"rushAtt":13.0,"rushYds":85.0,"rushTd":1.1,"half":279.8},"Ja'Marr Chase":{"rec":122.5,"recYds":1505.5,"recTd":11.0,"rushAtt":2.3,"rushYds":12.7,"rushTd":0.0,"half":277.1},"Amon-Ra St. Brown":{"rec":122.5,"recYds":1452.1,"recTd":10.7,"rushAtt":4.6,"rushYds":19.6,"rushTd":0.1,"half":272.3},"Jaxon Smith-Njigba":{"rec":109.9,"recYds":1566.1,"recTd":9.3,"rushAtt":6.6,"rushYds":34.1,"rushTd":0.1,"half":269.2},"CeeDee Lamb":{"rec":101.1,"recYds":1345.2,"recTd":7.9,"rushAtt":4.1,"rushYds":20.6,"rushTd":0.1,"half":234.7},"Rashee Rice":{"rec":99.9,"recYds":1134.1,"recTd":9.3,"rushAtt":4.3,"rushYds":19.5,"rushTd":0.6,"half":224.2},"Justin Jefferson":{"rec":101.2,"recYds":1297.7,"recTd":7.2,"rushAtt":1.0,"rushYds":4.2,"rushTd":0.0,"half":223.4},"Drake London":{"rec":97.7,"recYds":1263.7,"recTd":8.2,"rushAtt":0.0,"rushYds":0.0,"rushTd":0.0,"half":222.5},"A.J. Brown":{"rec":91.6,"recYds":1273.2,"recTd":7.9,"rushAtt":0.0,"rushYds":0.0,"rushTd":0.0,"half":220.1},"Chris Olave":{"rec":96.2,"recYds":1183.8,"recTd":7.7,"rushAtt":1.4,"rushYds":5.6,"rushTd":0.0,"half":213.1},"Josh Allen":{"passAtt":504.5,"passCmp":341.7,"passYds":3889.5,"passTd":26.8,"int":11.6,"rushAtt":115.5,"rushYds":577.9,"rushTd":11.1,"half":367.3},"Lamar Jackson":{"passAtt":459.1,"passCmp":297.0,"passYds":3715.2,"passTd":28.2,"int":9.5,"rushAtt":119.2,"rushYds":655.0,"rushTd":3.2,"half":328.1},"Drake Maye":{"passAtt":512.1,"passCmp":352.3,"passYds":4143.2,"passTd":27.6,"int":10.7,"rushAtt":98.3,"rushYds":480.6,"rushTd":3.8,"half":325.0},"Jalen Hurts":{"passAtt":500.5,"passCmp":325.1,"passYds":3638.4,"passTd":24.0,"int":8.1,"rushAtt":109.7,"rushYds":463.4,"rushTd":8.3,"half":321.8},"Dak Prescott":{"passAtt":586.9,"passCmp":387.3,"passYds":4328.3,"passTd":31.2,"int":11.7,"rushAtt":54.4,"rushYds":207.9,"rushTd":2.4,"half":315.8},"Joe Burrow":{"passAtt":595.0,"passCmp":396.9,"passYds":4215.6,"passTd":33.4,"int":11.5,"rushAtt":47.2,"rushYds":179.6,"rushTd":1.5,"half":313.7},"Jayden Daniels":{"passAtt":496.9,"passCmp":320.8,"passYds":3620.9,"passTd":23.0,"int":11.3,"rushAtt":126.4,"rushYds":649.9,"rushTd":4.7,"half":312.7},"Trevor Lawrence":{"passAtt":556.7,"passCmp":343.9,"passYds":3992.1,"passTd":26.3,"int":12.9,"rushAtt":81.0,"rushYds":361.0,"rushTd":5.1,"half":311.7},"Brock Purdy":{"passAtt":555.5,"passCmp":374.9,"passYds":4220.1,"passTd":28.1,"int":14.2,"rushAtt":70.8,"rushYds":304.1,"rushTd":3.7,"half":310.9},"Patrick Mahomes":{"passAtt":559.8,"passCmp":356.5,"passYds":3888.9,"passTd":27.4,"int":11.7,"rushAtt":63.9,"rushYds":361.2,"rushTd":3.4,"half":305.8},"Trey McBride":{"rec":111.4,"recYds":1100.2,"recTd":6.6,"half":204.7},"Brock Bowers":{"rec":93.9,"recYds":991.4,"recTd":6.8,"half":192.4},"Colston Loveland":{"rec":79.6,"recYds":913.9,"recTd":6.7,"half":171.2},"Tyler Warren":{"rec":77.9,"recYds":846.3,"recTd":5.2,"half":161.9},"Harold Fannin Jr.":{"rec":79.5,"recYds":790.5,"recTd":5.2,"half":158.6},"Sam LaPorta":{"rec":73.0,"recYds":837.6,"recTd":5.9,"half":155.2},"George Kittle":{"rec":70.4,"recYds":809.2,"recTd":6.0,"half":151.8},"Dallas Goedert":{"rec":69.6,"recYds":730.3,"recTd":7.1,"half":150.3},"Travis Kelce":{"rec":75.4,"recYds":796.7,"recTd":5.2,"half":148.0},"Tucker Kraft":{"rec":59.9,"recYds":777.2,"recTd":6.1,"half":143.9}};
 
+
+
+function rankLabel(p){
+  if(!p || p.custom) return '—';
+  if(p.pos==='K' || p.pos==='DST') return positionRank(p);
+  return p.rank!=null ? String(p.rank) : '—';
+}
+function rankSortValue(p){
+  if(!p) return 99999;
+  if(p.pos==='K' || p.pos==='DST'){
+    const n=parseInt((positionRank(p)||'').replace(/\D/g,''),10);
+    return 1000+(Number.isFinite(n)?n:999);
+  }
+  return p.rank!=null?p.rank:9999;
+}
 
 function displayRank(p){
   return p&&p.rank!=null?p.rank:999;
@@ -382,6 +462,7 @@ function playerStatusBadge(p){
 }
 
 function positionRank(p){
+  if(p&&p.specialPosRank)return p.specialPosRank;
   if(p&&p.v8PosRank)return p.v8PosRank;
   if(!p||!p.pos)return '';
   const same=pool.filter(x=>x.pos===p.pos).sort((a,b)=>a.rank-b.rank);
@@ -398,6 +479,13 @@ function detailedProjection(p){
 const defaults={teams:10,slot:1,rounds:16,pick:0,drafted:[],pos:'ALL',search:'',shown:40,notes:{},customPlayers:[],scoring:'Half PPR',sortMode:'recommended'};
 let state=loadState();
 let legacySpecialTeams=basePlayers.filter(p=>p.pos==='K'||p.pos==='DST');
+(function(){
+  let k=0,d=0;
+  legacySpecialTeams.forEach(p=>{
+    if(p.pos==='K'){k++;p.specialPosRank=`K${k}`;}
+    if(p.pos==='DST'){d++;p.specialPosRank=`DST${d}`;}
+  });
+})();
 let pool=[
   ...v8PlayerData.map((d,i)=>({id:'v8-'+(i+1),name:d.name,team:d.team,pos:d.pos,rank:d.rank,v8PosRank:d.posRank,v8Half:d.half})),
   ...legacySpecialTeams,
@@ -412,11 +500,11 @@ function pickInfo(index){const r=Math.floor(index/state.teams)+1,o=index%state.t
 function fillSlots(){const s=$('mySlot');s.innerHTML='';state.slot=Math.min(state.slot,state.teams);for(let i=1;i<=state.teams;i++){const o=document.createElement('option');o.value=i;o.textContent=`Pick ${i}`;if(i===state.slot)o.selected=true;s.appendChild(o)}}
 function untilMyPick(){for(let i=state.pick;i<state.teams*state.rounds;i++)if(pickInfo(i).team===state.slot)return i-state.pick;return null}
 function myPositions(){return state.drafted.filter(d=>d.pick.team===state.slot).map(d=>d.player.pos)}
-function scorePlayer(p){let s=p.rank;const mine=myPositions(),count=x=>mine.filter(v=>v===x).length;if(p.pos==='RB'&&count('RB')<2)s-=8;if(p.pos==='WR'&&count('WR')<2)s-=8;if(p.pos==='QB'&&count('QB')===0&&state.pick>state.teams*3)s-=10;if(p.pos==='TE'&&count('TE')===0&&state.pick>state.teams*4)s-=6;if((p.pos==='K'||p.pos==='DST')&&state.pick<state.teams*10)s+=90;if(state.scoring==='PPR'&&p.pos==='WR')s-=2;if(state.scoring==='Standard'&&p.pos==='RB')s-=2;return s}
+function scorePlayer(p){let s=(p.pos==='K'||p.pos==='DST')?1000+parseInt((positionRank(p)||'999').replace(/\D/g,''),10):p.rank;const mine=myPositions(),count=x=>mine.filter(v=>v===x).length;if(p.pos==='RB'&&count('RB')<2)s-=8;if(p.pos==='WR'&&count('WR')<2)s-=8;if(p.pos==='QB'&&count('QB')===0&&state.pick>state.teams*3)s-=10;if(p.pos==='TE'&&count('TE')===0&&state.pick>state.teams*4)s-=6;if((p.pos==='K'||p.pos==='DST')&&state.pick<state.teams*10)s+=90;if(state.scoring==='PPR'&&p.pos==='WR')s-=2;if(state.scoring==='Standard'&&p.pos==='RB')s-=2;return s}
 function draftPlayer(p){if(state.pick>=state.teams*state.rounds)return;const pk=pickInfo(state.pick);state.drafted.push({player:p,pick:pk});state.pick++;state.search='';$('search').value='';saveState();render();closeModals();showToast(`${p.name} → Team ${pk.team}`)}
 function undo(){if(!state.drafted.length)return;const d=state.drafted.pop();state.pick=Math.max(0,state.pick-1);saveState();render();showToast(`Undid ${d.player.name}`)}
 function resetDraft(){if(!confirm('Clear all picks and start over?'))return;state.pick=0;state.drafted=[];saveState();render()}
-function openInfo(p){selected=p;$('infoRank').textContent=`OVERALL RANK #${p.custom?'—':p.rank}`;$('infoName').textContent=p.name;$('infoMeta').innerHTML=`${positionRank(p)} · ${p.team} · Bye Week ${byeWeek(p)} ${playerStatusBadge(p)}${p.injuryStatus?' · '+p.injuryStatus:(p.liveStatus&&p.liveStatus!=='Active'?' · '+p.liveStatus:'')}`;const rec=scorePlayer(p)<p.rank?'Fits a current roster need.':'Available based on overall ranking.';const pp=projectedPoints(p);$('recommendation').innerHTML=`<b>Draft snapshot</b><br>Rank: ${p.custom?'Custom':`#${p.rank}`} · Projection: ${pp==null?'Not loaded':pp.toFixed(1)+' pts'} (${state.scoring}) · ${rec}`;const d=detailedProjection(p), s=sampleStats[p.name];
+function openInfo(p){selected=p;$('infoRank').textContent=(p.pos==='K'||p.pos==='DST')?`POSITION RANK ${positionRank(p)}`:`OVERALL RANK #${p.custom?'—':p.rank}`;$('infoName').textContent=p.name;$('infoMeta').innerHTML=`${positionRank(p)} · ${p.team} · Bye Week ${byeWeek(p)} ${playerStatusBadge(p)}${p.injuryStatus?' · '+p.injuryStatus:(p.liveStatus&&p.liveStatus!=='Active'?' · '+p.liveStatus:'')}`;const rec=scorePlayer(p)<p.rank?'Fits a current roster need.':'Available based on overall ranking.';const pp=projectedPoints(p);$('recommendation').innerHTML=`<b>Draft snapshot</b><br>Rank: ${p.custom?'Custom':((p.pos==='K'||p.pos==='DST')?positionRank(p):`#${p.rank}`)} · Projection: ${pp==null?'Not loaded':pp.toFixed(1)+' pts'} (${state.scoring}) · ${rec}`;const d=detailedProjection(p), s=sampleStats[p.name];
   if(d){
     const cards=[];
     if(p.pos==='QB'){
@@ -441,7 +529,7 @@ function closeModals(){document.querySelectorAll('.modal').forEach(m=>m.classLis
 function render(){
   $('teamCount').value=state.teams;$('rounds').value=state.rounds;$('scoring').value=state.scoring;fillSlots();
   const cur=pickInfo(state.pick);$('pickLabel').textContent=cur.label;$('teamLabel').textContent=`Team ${cur.team}`;const yours=cur.team===state.slot;$('turnText').textContent=yours?'🏈 YOUR PICK':`Waiting for Team ${cur.team}`;$('turnText').className='big status '+(yours?'yours':'');const u=untilMyPick();$('nextYou').textContent=yours?'Choose your player below':u===null?'Draft complete':`${u} pick${u===1?'':'s'} until you`;$('myTeamLabel').textContent=`Team ${state.slot}`;
-  const used=new Set(state.drafted.map(d=>d.player.id));let avail=pool.filter(p=>!used.has(p.id));$('poolCount').textContent=avail.length;if(state.pos!=='ALL')avail=avail.filter(p=>p.pos===state.pos);if(state.search)avail=avail.filter(p=>(p.name+' '+p.team).toLowerCase().includes(state.search));if(state.sortMode==='rank') avail.sort((a,b)=>a.rank-b.rank);
+  const used=new Set(state.drafted.map(d=>d.player.id));let avail=pool.filter(p=>!used.has(p.id));$('poolCount').textContent=avail.length;if(state.pos!=='ALL')avail=avail.filter(p=>p.pos===state.pos);if(state.search)avail=avail.filter(p=>(p.name+' '+p.team).toLowerCase().includes(state.search));if(state.sortMode==='rank') avail.sort((a,b)=>rankSortValue(a)-rankSortValue(b));
   else if(state.sortMode==='projection') avail.sort((a,b)=>{
     const ap=projectedPoints(a), bp=projectedPoints(b);
     if(ap==null && bp==null) return a.rank-b.rank;
@@ -454,8 +542,8 @@ function render(){
   $('projSortBtn').textContent=state.sortMode==='projection'?'PROJ ↓':'PROJ';
   $('rankSortBtn').classList.toggle('active',state.sortMode==='rank');
   $('projSortBtn').classList.toggle('active',state.sortMode==='projection');
-  $('sortHelp').textContent=state.sortMode==='rank'?'Sorted by overall rank · tap PROJ for projected points.':state.sortMode==='projection'?`Sorted by ${state.scoring} projected season points · highest first.`:'200 draft-relevant players loaded · tap RK or PROJ to sort.';
-  const list=$('playerList');list.innerHTML='';avail.slice(0,state.shown).forEach((p,idx)=>{const row=document.createElement('div');row.className='player-row';const proj=projectedPoints(p);row.innerHTML=`<div class="small muted">${p.custom?'—':p.rank}</div><div class="small"><b>${proj==null?'—':proj.toFixed(1)}</b></div><div><button type="button" class="pname-btn" aria-label="View ${p.name} player info">${p.name}</button><div class="small muted">${p.team} · ${positionRank(p)} · Bye ${byeWeek(p)} ${playerStatusBadge(p)}${idx<3?(state.sortMode==='rank'?' · Top ranked':state.sortMode==='projection'?' · Top projection':' · Recommended'):''}</div></div><div class="small"><b>${p.pos}</b></div>`;row.querySelector('.pname-btn').onclick=()=>openInfo(p);const draft=document.createElement('button');draft.className='btn primary';draft.textContent='Draft';draft.onclick=()=>draftPlayer(p);row.append(draft);list.appendChild(row)});$('moreBtn').style.display=avail.length>state.shown?'block':'none';
+  $('sortHelp').textContent=state.sortMode==='rank'?'Sorted by draft rank · K/DST use position rank · tap PROJ for projected points.':state.sortMode==='projection'?`Sorted by ${state.scoring} projected season points · highest first.`:'200 draft-relevant players loaded · tap RK or PROJ to sort.';
+  const list=$('playerList');list.innerHTML='';avail.slice(0,state.shown).forEach((p,idx)=>{const row=document.createElement('div');row.className='player-row';const proj=projectedPoints(p);row.innerHTML=`<div class="small muted">${rankLabel(p)}</div><div class="small"><b>${proj==null?'—':proj.toFixed(1)}</b></div><div><button type="button" class="pname-btn" aria-label="View ${p.name} player info">${p.name}</button><div class="small muted">${p.team} · ${positionRank(p)} · Bye ${byeWeek(p)} ${playerStatusBadge(p)}${idx<3?(state.sortMode==='rank'?' · Top ranked':state.sortMode==='projection'?' · Top projection':' · Recommended'):''}</div></div><div class="small"><b>${p.pos}</b></div>`;row.querySelector('.pname-btn').onclick=()=>openInfo(p);const draft=document.createElement('button');draft.className='btn primary';draft.textContent='Draft';draft.onclick=()=>draftPlayer(p);row.append(draft);list.appendChild(row)});$('moreBtn').style.display=avail.length>state.shown?'block':'none';
   const goals={QB:1,RB:2,WR:2,TE:1,K:1,DST:1};const mine=state.drafted.filter(d=>d.pick.team===state.slot);$('needs').innerHTML=Object.entries(goals).map(([p,n])=>{const h=mine.filter(d=>d.player.pos===p).length;return `<span class="tag need ${h>=n?'done':''}">${p} ${h}/${n}</span>`}).join('');$('roster').innerHTML=mine.length?mine.map(d=>`<div class="roster-row"><span>${d.player.name}</span><span class="muted">${d.player.pos}</span></div>`).join(''):'<div class="small muted">Your roster is empty.</div>';
   $('recent').innerHTML=state.drafted.length?state.drafted.slice(-6).reverse().map(d=>`<div class="recent-row"><span>${d.pick.label} · T${d.pick.team}</span><b>${d.player.name}</b></div>`).join(''):'<div class="small muted">No picks yet.</div>';
   $('nextPicks').innerHTML='';for(let i=0;i<6;i++){const n=pickInfo(state.pick+i);const c=document.createElement('div');c.className='next-cell '+(n.team===state.slot?'me':'');c.innerHTML=`<b>${n.label}</b><br><span class="muted">T${n.team}</span>`;$('nextPicks').appendChild(c)}
