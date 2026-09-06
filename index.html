@@ -88,7 +88,7 @@
 
   <div class="main">
     <section class="panel">
-      <div class="headrow"><div><h3 class="section-title">Best Available</h3><span class="small muted" style="margin-left:8px">v10</span><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Top-200 skill-player rankings + position ranks for K/DST. Live team, projection, injury and status data refreshes from Sleeper.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div><div class="status-legend small muted">
+      <div class="headrow"><div><h3 class="section-title">Best Available</h3><span class="small muted" style="margin-left:8px">v10.1</span><div id="liveStatus" class="small muted" style="margin-top:2px">Loading live Sleeper data…</div><div class="small muted">Top-200 skill-player rankings + K/DST position ranks. Sleeper live projections + verified player-only injury/status badges.</div><div id="sortHelp" class="small muted">200 draft-relevant players loaded · tap RK or PROJ to sort.</div><div class="status-legend small muted">
 <span class="status-badge status-q" title="Questionable">?</span> Q
 <span class="status-badge status-d" title="Doubtful">!</span> D
 <span class="status-badge status-o" title="Out">×</span> Out
@@ -217,6 +217,7 @@ function sleeperPoints(stats,keyList){
   return null;
 }
 function applyLiveRecords(records, updatedAt){
+  pool.forEach(p=>{ if(p.pos==='DST'){p.liveStatus=null;p.injuryStatus=null;} });
   const byName=new Map(pool.map(p=>[normName(p.name),p]));
   let matched=0, projected=0, teams=0;
   for(const r of records||[]){
@@ -231,8 +232,13 @@ function applyLiveRecords(records, updatedAt){
       if(p.team!==r.team) teams++;
       p.team=r.team;
     }
-    if(r.status) p.liveStatus=r.status;
-    if(r.injury_status) p.injuryStatus=r.injury_status;
+    if(p.pos==='DST'){
+      p.liveStatus=null;
+      p.injuryStatus=null;
+    }else{
+      p.liveStatus=r.status||null;
+      p.injuryStatus=r.injury_status||null;
+    }
     if(r.half!=null){p.liveHalf=Number(r.half); projected++;}
     if(r.ppr!=null)p.livePpr=Number(r.ppr);
     if(r.std!=null)p.liveStd=Number(r.std);
@@ -341,7 +347,7 @@ async function refreshLiveData(force=false){
         player_id:`DST-${team}`,
         name:full,
         team,
-        status:'Active',
+        status:null,
         injury_status:null,
         half:sleeperPoints(st,['pts_half_ppr','half_ppr','pts_std','pts_standard','fantasy_points']),
         ppr:sleeperPoints(st,['pts_ppr','pts_half_ppr','pts_std','pts_standard','fantasy_points']),
@@ -440,24 +446,35 @@ function displayRank(p){
 
 
 function playerStatusBadge(p){
-  const raw=((p&&p.injuryStatus)||'').toString().trim();
-  const live=((p&&p.liveStatus)||'').toString().trim();
-  const s=(raw||live).toLowerCase();
+  // Team defenses do not have individual injury designations.
+  if(!p || p.pos==='DST') return '';
 
-  let label='', cls='status-na', title='';
-  if(!s || s==='active' || s==='healthy' || s==='none'){
-    return '';
+  const injury=((p.injuryStatus)||'').toString().trim();
+  const roster=((p.liveStatus)||'').toString().trim();
+  const i=injury.toLowerCase();
+  const s=roster.toLowerCase();
+
+  let label='', cls='', title='';
+
+  // injury_status is the authoritative field for game-status designations.
+  if(i==='questionable'){label='?';cls='status-q';title='Questionable';}
+  else if(i==='doubtful'){label='!';cls='status-d';title='Doubtful';}
+  else if(i==='out'){label='×';cls='status-o';title='Out';}
+  else if(i==='ir' || i==='injured reserve' || i==='reserve/injured'){label='IR';cls='status-ir';title='Injured Reserve';}
+  else if(i==='pup' || i.includes('physically unable')){label='PUP';cls='status-pup';title='PUP';}
+  else if(i==='nfi' || i.includes('non-football')){label='NFI';cls='status-pup';title='Non-football injury list';}
+  else if(i==='suspended' || i==='suspension'){label='S';cls='status-sus';title='Suspended';}
+
+  // Sleeper sometimes places reserve/suspension roster state in status rather than injury_status.
+  if(!label){
+    if(s==='injured reserve' || s==='ir' || s==='reserve/injured'){label='IR';cls='status-ir';title='Injured Reserve';}
+    else if(s==='pup' || s.includes('physically unable')){label='PUP';cls='status-pup';title='PUP';}
+    else if(s==='nfi' || s.includes('non-football')){label='NFI';cls='status-pup';title='Non-football injury list';}
+    else if(s==='suspended' || s==='suspension'){label='S';cls='status-sus';title='Suspended';}
   }
-  if(s.includes('question')){label='?';cls='status-q';title='Questionable';}
-  else if(s.includes('doubt')){label='!';cls='status-d';title='Doubtful';}
-  else if(s==='out' || s.includes(' out')){label='×';cls='status-o';title='Out';}
-  else if(s.includes('injured reserve') || s==='ir' || s.includes('reserve/injured')){label='IR';cls='status-ir';title='Injured Reserve';}
-  else if(s.includes('suspend')){label='S';cls='status-sus';title='Suspended';}
-  else if(s.includes('pup')){label='PUP';cls='status-pup';title='PUP';}
-  else if(s.includes('non-football') || s.includes('nfi')){label='NFI';cls='status-pup';title='Non-football injury list';}
-  else if(s.includes('inactive')){label='×';cls='status-o';title='Inactive';}
-  else {label='!';cls='status-na';title=raw||live;}
 
+  // Unknown/non-standard Sleeper values intentionally render no badge.
+  if(!label) return '';
   return `<span class="status-badge ${cls}" title="${title}" aria-label="${title}">${label}</span>`;
 }
 
